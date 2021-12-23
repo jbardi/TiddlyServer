@@ -5,8 +5,8 @@
   "homepage": "https://arlen22.github.io/tiddlyserver/",
   "repository": "github:Arlen22/TiddlyServer",
   "dependencies": {
-    "tiddlywiki-production-client": "5.2.0",
-    "tiddlywiki-production-server": "5.2.0"
+    "tiddlywiki-production-client": "5.2.1",
+    "tiddlywiki-production-server": "5.2.1"
   },
   "devDependencies": {
     "@types/copy-webpack-plugin": "^5.0.0",
