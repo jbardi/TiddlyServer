@@ -4,7 +4,7 @@ import { Stats } from "fs";
 import * as path from "path";
 import { promisify } from "util";
 import * as zlib from "zlib";
-
+import { mime } from "send";
 import * as formidable from "formidable";
 import { handleDataFolderRequest, handleWebsocketConnection } from "./data-folder";
 import { OptionsConfig } from "./server-config";
@@ -26,11 +26,14 @@ import {
   IStatPathResult,
   getStatPathResult,
   DirectoryIndexOptions,
+  DirectoryIndexKeys,
+  DirectoryIndexEntry,
 } from "./server-types";
 import { StateObject } from "./state-object";
 import { RequestEvent } from "./request-event";
 import { parse } from "url";
 import { generateDirectoryListing } from './generate-directory-listing';
+import { contains, first, firstArray, keys } from "./utils-functions";
 
 
 // it isn't pretty but I can't find a way to improve it - 2020/04/10
@@ -44,9 +47,12 @@ function generateErrorPage(type: 403 | 404, path: string, state: {
     upload: false,
     mkdir: false,
     mixFolders: state.settings.directoryIndex.mixFolders,
-    isLoggedIn: state.username ? state.username + " (group " + state.authAccountKey + ")" : (false as false),
+    isLoggedIn: state.username
+      ? state.username + " (group " + state.authAccountKey + ")"
+      : (false as false),
     format: "html",
-    extTypes: state.settings.directoryIndex.types
+    extIcons: state.settings.directoryIndex.types,
+    sort: []
   });
 }
 
@@ -62,7 +68,7 @@ export async function handleTreeRoute(event: RequestEvent, eventer: ServerEventE
 
   let { authList, authError } = treeOptions.auth;
 
-  
+
   if (Array.isArray(authList) && authList.indexOf(event.authAccountKey) === -1)
     return event.close(403, authAccessDenied(
       authError,
@@ -252,17 +258,22 @@ export class TreeStateObject<STATPATH extends StatPathResult = StatPathResult> e
       }
 
       //generate the index using generateDirectoryListing.js
-      const format = state.treeOptions.index.defaultType as "html" | "json";
       const options = this.getDirectoryIndexOptions(isFolder);
-      let contentType = {
+
+      let contentType: { [K in DirectoryIndexOptions["format"]]: string } = {
         html: "text/html",
         json: "application/json",
+        rss: "application/rss"
       };
+      const format = first(state.url.query.format);
+      if (format && contains(keys(contentType), format)) {
+        options.format = format;
+      }
       let e = await state.getTreePathFiles();
       let res = await sendDirectoryIndex(e, options);
       state
         .respond(200, "", {
-          "Content-Type": contentType[format],
+          "Content-Type": options.format,
           "Content-Encoding": "utf-8",
         })
         // @ts-ignore
@@ -290,6 +301,16 @@ export class TreeStateObject<STATPATH extends StatPathResult = StatPathResult> e
 
 
   private getDirectoryIndexOptions(isFolder: boolean): DirectoryIndexOptions {
+    let sort = firstArray(this.url.query.sort);
+    if (!sort.every((e) =>
+      contains(DirectoryIndexKeys, e.startsWith("-") ? e.substr(1) : e)
+    )) {
+      this.throwReason(400, "sort argument must be one of "
+        + DirectoryIndexKeys.join(", ")
+        + "; optionally prefixed with a minus sign (-)");
+      throw false;
+    }
+    
     return {
       upload: isFolder && this.allow.upload,
       mkdir: isFolder && this.allow.mkdir,
@@ -298,7 +319,8 @@ export class TreeStateObject<STATPATH extends StatPathResult = StatPathResult> e
         ? this.username + " (group " + this.authAccountKey + ")"
         : (false as false),
       format: this.treeOptions.index.defaultType as "html" | "json",
-      extTypes: this.settings.directoryIndex.types
+      extIcons: this.settings.directoryIndex.types,
+      sort
     };
   }
 

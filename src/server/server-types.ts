@@ -2,7 +2,7 @@ import * as http from "http";
 import * as url from "url";
 import * as fs from "fs";
 import * as path from "path";
-
+import mime = require('mime');
 import { format, promisify } from "util";
 import * as JSON5 from "json5";
 import * as send from "send";
@@ -28,7 +28,9 @@ import {
   Config,
   OptionsConfig,
 } from "./server-config";
-import { JsonError } from "./utils";
+
+import { JsonError, keys } from "./utils-functions";
+// import { JsonError } from "./utils";
 import { checkServerConfigSchema } from "./interface-checker";
 export {
   Config,
@@ -116,8 +118,9 @@ export type ServerEvents = {
   "serverClose": readonly [string]
 }
 export type ServerEventEmitter = EventEmitter<ServerEvents>;
+export const TAGS = ["B", "KB", "MB", "GB", "TB", "PB"] as const;
 export function getHumanSize(size: number) {
-  const TAGS = ["B", "KB", "MB", "GB", "TB", "PB"];
+
   let power = 0;
   while (size >= 1024) {
     size /= 1024;
@@ -282,7 +285,8 @@ export function sendResponse(
   }
 }
 
-import { generateDirectoryListing } from "./generate-directory-listing.js";
+import { generateDirectoryListing } from "./generate-directory-listing";
+import { generateDirectoryRSS } from "./generate-directory-rss";
 import { RequestEvent } from "./request-event";
 
 //const generateDirectoryListing: (...args: any[]) => string = require('./generate-directory-listing').generateDirectoryListing;
@@ -300,17 +304,31 @@ export type DirectoryIndexListing = {
     icon: string;
     type: "error" | "folder" | "datafolder" | "file" | "group";
     size: string;
+    mime: string;
+    modified: number;
   }[]
   type: "group" | "folder" | 403 | 404
 }
 export type DirectoryIndexOptions = {
   upload: boolean;
   mkdir: boolean;
-  format: "json" | "html";
+  format: "json" | "html" | "rss";
   mixFolders: boolean;
   isLoggedIn: string | false;
-  extTypes: { [ext_mime: string]: string };
+  extIcons: { [ext_mime: string]: string };
+  sort: string[]
 };
+export type DirectoryIndexEntry = DirectoryIndexListing["entries"][number];
+export const DirectoryIndexKeys = keys<{ [K in keyof DirectoryIndexEntry]: undefined }>({
+  name: undefined,
+  size: undefined,
+  icon: undefined,
+  mime: undefined,
+  modified: undefined,
+  path: undefined,
+  type: undefined
+});
+
 export async function sendDirectoryIndex(_r: DirectoryIndexData, options: DirectoryIndexOptions) {
   let { keys, paths, dirpath, type } = _r;
   // let pairs = keys.map((k, i) => [k, paths[i]] as [string, string | boolean]);
@@ -319,25 +337,67 @@ export async function sendDirectoryIndex(_r: DirectoryIndexData, options: Direct
       let statpath = paths[i];
       let stat = statpath === true ? undefined : await statPath(statpath, false);
       const nameparts = key.indexOf(".") !== -1 ? key.split(".").pop() : "";
-      return {
+      const list: DirectoryIndexListing["entries"][number] = {
         name: key,
         path: key + (!stat || stat.itemtype === "folder" ? "/" : ""),
         type: !stat ? "group" : stat.itemtype,
         icon: !stat ? "group.png" : (stat.itemtype === "file")
-          ? (nameparts && options.extTypes[nameparts] || "other.png")
+          ? (nameparts && options.extIcons[nameparts] || "other.png")
           : (stat.itemtype as string + ".png"),
         size: stat && stat.stat ? getHumanSize(stat.stat.size) : "",
-      } as DirectoryIndexListing["entries"][number];
+        mime: (stat?.itemtype === "file") ? mime.lookup(statpath, "") : "",
+        modified: stat?.stat?.mtimeMs || 0,
+
+      };
+      return list;
     })
   );
+  sortDirectoryEntries(entries, options)
   if (options.format === "json") {
     return JSON.stringify({ path: dirpath, entries, type, options }, null, 2);
+  } else if (options.format === "rss") {
+    let def: DirectoryIndexListing = { path: dirpath, entries, type };
+    return generateDirectoryRSS(def, options);
   } else {
-    let def = { path: dirpath, entries, type };
+    let def: DirectoryIndexListing = { path: dirpath, entries, type };
     return generateDirectoryListing(def, options);
   }
 }
+export const directorySorters: {
+  [K in keyof DirectoryIndexEntry]: (
+    // e: DirectoryIndexListing["entries"][number],
+    a: DirectoryIndexListing["entries"][number],
+    b: DirectoryIndexListing["entries"][number],
+    opts: DirectoryIndexOptions
+  ) => number
+} = {
+  name: (a, b, opts) =>
+    (opts.mixFolders ? 0 : directorySorters.type(a,b,opts))
+    || a.name.localeCompare(b.name),
+  size: (a, b, opts) =>
+    TAGS.findIndex(e => a.size.endsWith(e)) - TAGS.findIndex(e => b.size.endsWith(e))
+    || +a.size - +b.size,
+  modified: (a,b,opts) => b.modified - a.modified,
+  path: (a,b,opts) => a.path.localeCompare(b.path),
+  icon: (a,b,opts) => a.icon.localeCompare(b.icon),
+  mime: (a,b,opts) => a.mime.localeCompare(b.mime),
+  type: (a,b,opts) => +(a.type === "file") - +(b.type === "file"),
+};
 
+
+/** sort directory entries in place according to sort array*/
+export function sortDirectoryEntries(entries: DirectoryIndexListing["entries"], opts: DirectoryIndexOptions) {
+  var { sort } = opts;
+  return entries.sort((a, b) => {
+    for (var i = 0, diff = 0, e = sort[i], reverse = false; i < sort.length && !diff; (i++, e = sort[i])) {
+      reverse = e.startsWith("-");
+      if (reverse) e = e.substr(1);
+      diff = directorySorters[e](a, b, opts);
+    }
+    if(reverse) return -diff;
+    else return diff;
+  });
+}
 /**
  * If the path
  */
